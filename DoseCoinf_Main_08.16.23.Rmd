@@ -1,0 +1,646 @@
+---
+title: "Analysis of data on spore dose & multiparasite exposures/infections"
+author: "Kit McLean & Meghan A. Duffy"
+date: "July 2021-June 2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      results = "hide", 
+                      warning = FALSE, 
+                      message = FALSE)
+```
+
+# Coinfection response surface study 
+
+
+
+```{r, results = 'hide'}
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(mgcv)
+library(lubridate)
+library(psych)
+library(grid)
+library(animation)
+library(itsadug)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(tinytex)
+library(scales)
+library(ggpubr)
+library(gratia)
+library(patternplot)
+library('gratia')
+library(rstatix)
+library(coin)
+library(emmeans)
+
+# Analyses to Run
+# A.Probability of Infection
+# B.Host lifespan 
+# C.Within-host spore load
+
+#Loading data into R...
+rawdat <- read.csv("Coinfection_Response_Surface_main.csv")
+
+```
+
+
+```{r message=FALSE, include=FALSE}
+ 
+## Data Clean-up
+
+#assign simpler column names to main variable of interest
+colnames(rawdat)[1:2] <- c("P", "M")
+colnames(rawdat)[10] <- "finP"
+colnames(rawdat)[14] <- "finM"
+
+rawdat$P <- as.numeric(rawdat$P)
+rawdat$M <- as.numeric(rawdat$M)
+
+#Drop weird NAs at end of data frame (must be an import error; these are not present in .csv file itself)
+rawdat2 <-
+  rawdat %>%
+  drop_na(P,M) %>%
+  subset(select= -c(6:9, 11:13,15:17))
+
+#Convert dates to a workable format
+Exp.date <- mdy(rawdat2$Exposure.date)
+Mort.date <- mdy(rawdat2$Mortality.date)
+as.numeric(Exp.date)
+as.numeric(Mort.date)
+
+#Now I want to find the length of time it took each animal to die in days.
+timetodeath <- Exp.date %--% Mort.date
+timetodeath <- as.period(timetodeath)
+timetodeath.sec <- period_to_seconds(timetodeath)
+
+#animals were infected at 6 days old, therefore I'm adding 518400 seconds (6 days) to the timetodeath to get total lifespan
+lifespan.sec <- timetodeath.sec + 518400
+lifespan.day.frac <- lifespan.sec/86400
+lifespan.day <- ceiling(lifespan.day.frac)
+
+dat1 <- cbind(rawdat2, lifespan.day)
+
+#Replace extremely low spore counts with 0, as I assume those were cross-contaminations
+dat1$finM <- as.numeric(dat1$finM)
+dat1$finP <- as.numeric(dat1$finP)
+
+dat1$finM[dat1$finM < 6668] <- 0
+dat1$finP[dat1$finP < 6668] <- 0
+
+dat2 <- dat1 %>%
+  filter(Exposure.date != "NA") %>%
+  mutate(finM = replace(finM, finM == "#DIV/0!", 0))
+
+#Change "NA" mortality dates to 0 (these are uninfected animals)
+dat2$Mortality.date[is.na(dat2$Mortality.date)] <- 0
+
+#Convert extremely low spore yields to spore yield = 0 (because )
+
+#Create columns for binary data on infection status (1 = TRUE, 0 = FALSE)
+dat2$P_yes = (dat2$`finP` > 0)
+dat2$M_yes = (dat2$`finM`> 0)
+dat2$Co_yes =  (dat2$`finP` > 0) & (dat2$`finM`> 0)
+dat2$Uninf = (dat2$`Mortality.date` == 0 | dat2$`finP` == 0 & dat2$`finM`== 0)
+
+
+dat2$P_yes <- as.numeric(dat2$P_yes)
+dat2$M_yes <- as.numeric(dat2$M_yes)
+dat2$Co_yes <- as.numeric(dat2$Co_yes)
+dat2$Uninf <- as.numeric(dat2$Uninf)
+
+dat3 <- dat2 %>% filter(Mortality.date != "missing")
+
+#Split off uninfected animals from the rest of the data set so it's easier to clean up
+#the infected data set
+
+uninfecteddat <- dat3 %>% filter(Mortality.date == 0)
+
+#Infected only dat, minus all missing values
+infecteddat <- dat3 %>% filter(Mortality.date != 0,
+                               finP != "missing",
+                               finP != "Missing",
+                               finM != "missing",
+                               finM != "Missing")
+
+dat4 <- rbind(uninfecteddat, infecteddat)
+
+#Make sure spore counts are numeric
+dat4$finM <- as.numeric(dat4$finM)
+dat4$finP <- as.numeric(dat4$finP)
+
+#Create new column for animals that were diagnosed as infected but had 0 spores when processed
+dat4$ZeroSpore = (dat4$`Mortality.date` !=0) & (dat4$`finP` == 0) & (dat4$`finM` == 0)
+dat4$ZeroSpore <- as.numeric(dat4$ZeroSpore)
+
+dat4[is.na(dat4)] <- 0
+
+#Removing the "oops" coinfection
+dat4 <- dat4[!(dat4$M == 0 & dat4$finM != 0),]
+
+#Convert spore densities into per-host densities (by dividing by 10)
+dat5 <- 
+  dat4 %>%
+  mutate(
+    finM = finM/10,
+    finP = finP/10
+  )
+
+#Save as its own dataset
+final.fulllifespandat <- dat5
+
+#Rename and filter to exclude hosts that were diagnosed as infected but had 0 spores when processed
+final <- dat5 %>% filter(ZeroSpore == 0)
+
+#transform the data into log version so it is more usable for GAMs
+transfinal <- 
+  final %>% 
+  mutate(logaP = log(P+1),
+         logaM = log(M+1))
+
+#The gam needs synthetic training data to operate properly at spore doses = 0 (so the model shows a probability of infection equal to (very near) 0 when there are 0 parasites present)
+#The gam needs synthetic training data to operate properly at spore doses = 0
+
+ P <- rep(c(0), each = 10000)
+ M <- rep(c(0), each = 10000)
+ finP <- rep(c(0), each = 10000)
+ finM <- rep(c(0), each = 10000)
+ logaP <- rep(c(0), each = 10000)
+ logaM <- rep(c(0), each = 10000)
+ P_yes <- rep(c(0), each = 10000)
+ M_yes <- rep(c(0), each = 10000)
+ Co_yes <- rep(c(0), each = 10000)
+ Uninf <- rep(c(0), each = 10000)
+ Infect <- rep(c(0), each = 10000)
+
+dfzeros <- data.frame(P,M,finP,finM,logaP,logaM,P_yes,M_yes,Co_yes,Uninf,Infect)
+
+transzeros <- full_join(transfinal, dfzeros)
+
+```
+
+## A. PROBABILITY OF INFECTION  
+### Data Exploration & GAMs
+
+### Dose Past and/or Metsch dose determine probability of infection with Past(only), Metsch(only), or Coinfection(both)?
+
+### Answer: 
+### Pr(Past infection) determined by P & M ; model: Pinf_gam
+### Pr(Metsch infection) determined by M ; model: Minf_gam
+### Pr(Coinfection) determined by P & M ; model: Coinf_gam
+ 
+```{r}
+
+Pnull_dat <- 
+  transzeros %>%
+  filter(M == "0")
+
+#Probability of Past infections (single + coinfections) without interaction terms
+Pinf_gam <- gam(P_yes ~ s(logaP, k = 7) + s(logaM, k = 7), method = "REML", data=transzeros, family = binomial)
+
+plot(Pinf_gam,se = TRUE) #se stands for standard error Bands
+
+#Using a GAM approach with interaction terms
+Pinf_gam_inter <- gam(P_yes ~ s(logaP, k = 7) + s(logaM, k = 7) + te(logaP, logaM, k = c(7,7)), method = "REML", data=transzeros, family = binomial)
+
+#Comparing the two models
+summary(Pinf_gam)
+summary(Pinf_gam_inter)
+
+#The interaction term is not significant, so we plot the simpler model.
+
+vis.gam(Pinf_gam, main= "Probability of any bacterial infection", plot.type = "contour", type= "response",
+       color = "topo", contour.col = "black", lwd = 2, xlab = expression(paste("ln(bacterial dose (spores / mL))")), ylab = expression(paste("ln(fungal dose (spores / mL))")))
+
+##############################
+```
+
+```{r}
+
+#probability of Metsch infections (single + coinfections) 
+Minf_gam <- gam(M_yes ~ s(logaP, k = 7) + s(logaM, k = 7), method = "REML", data=transzeros, family = binomial)
+
+plot.gam(Minf_gam)
+
+##Using a GAM approach with interaction terms
+Minf_gam_inter <- gam(M_yes ~ s(logaP, k = 7) + s(logaM, k = 7) + te(logaP, logaM, k = c(7,7)), method = "REML", data=transzeros, family = binomial)
+
+#Comparing the two models
+summary(Minf_gam)
+summary(Minf_gam_inter)
+
+#The interaction term is not significant, so we plot the simpler model.
+vis.gam(Minf_gam, view = NULL, main= "vis.gam: Probability of any fungal infection", plot.type = "contour", type= "response", color = "topo", contour.col = "black", lwd = 2, xlab = expression(paste("ln(bacterial dose (spores / mL))")), ylab = expression(paste("ln(fungal dose (spores / mL))")))
+
+```
+
+```{r}
+
+#probability of coinfection is determined by both P dose and M dose
+Coinf_gam <- gam(Co_yes ~ s(logaP, k=7) + s(logaM, k=7), method = "REML", data=transzeros)
+
+##Using a GAM approach with interaction terms
+Coinf_gam_inter <- gam(Co_yes ~ s(logaP, k = 7) + s(logaM, k = 7) + te(logaP, logaM, k = c(7,7)), method = "REML", data=transzeros, family = binomial)
+
+#Comparing the two models
+summary(Coinf_gam)
+summary(Coinf_gam_inter)
+
+#The interaction term is not significant, so we plot the simpler model.
+vis.gam(Coinf_gam, main= "Probability of coinfection", plot.type = "contour", type= "response",
+       color = "topo", contour.col = "black", lwd = 2, xlab = expression(paste("ln(bacterial dose (spores / mL))")), ylab = expression(paste("ln(fungal dose (spores / mL))")))
+
+
+```
+
+```{r}
+
+#Independent or interaction effects on prevalence of coinfection? (Using real data)
+
+propfinal <- transfinal %>%
+  group_by(P,M) %>%
+  summarise(
+    propP = mean(P_yes == "1"),
+    propM = mean(M_yes == "1"),
+    propCo = mean(Co_yes == "1")
+  ) %>%
+  mutate(logaP = log(P+1),
+         logaM = log(M+1))
+
+
+InterEff <- glm(((propCo/(propP * propM)-1)) ~ logaP + logaM + logaP*logaM, data = propfinal)
+summary(InterEff)
+
+#Drop ns interaction
+InterEff0 <- glm(((propCo/(propP * propM)-1)) ~ logaP + logaM, data = propfinal)
+summary(InterEff0)
+
+#Drop ns main effects
+InterEff1 <- glm(((propCo/(propP * propM))) ~ 1, data = propfinal)
+summary(InterEff1)
+
+#So proportion of coinfected is about half of what you would predict. 
+#I.e. it looks like there is some interference between the two parasites at the point of infection  
+
+``` 
+
+
+## B.0.	HOST LIFESPAN (incomplete measure of virulence) 
+### Data exploration 
+#### with log-transformed dose data
+
+```{r, fig.width=6, fig.height= 6}
+
+#Assign infection categories (IU = diagnosed as infected but had 0 spores during spore counts, P = Pasteuria-only infections, M = Metsch-only infections, C = Coinfection with Past and Metsch) and remove all uninfected animals, which don't have lifespan data (Mortality.date !=0)
+
+translifedat2 <-
+  final.fulllifespandat %>% mutate(infect.cat = case_when(
+    finP == 0 & finM == 0 & Mortality.date !=0 ~ "IU" ,
+    finP > 0 & finM == 0 ~ "P"  ,
+    finP == 0 & finM > 0 ~ "M"  ,
+    finP > 0 & finM > 0 ~ "C"
+  )
+) %>%
+  mutate(logaP = log(P+1),
+         logaM = log(M+1)) %>%
+  filter(Mortality.date != 0)
+
+lifedat2.nozs <-
+  translifedat2 %>% filter(infect.cat != "IU")
+
+life_infectcat_viol <-
+  ggviolin(lifedat2.nozs, x = "infect.cat", y = "lifespan.day", 
+         fill = "infect.cat",
+         scale = "width",
+         palette = c("#02818a", "#bdc9e1", "#67a9cf"),
+         #add = c("boxplot"),
+         add.params = list(fill = "white"), 
+         xlab = " ",
+         ylab = "Lifespan (days)", 
+         show.legend = FALSE
+         ) + 
+  theme_bw() +
+  theme(text = element_text(size=11), axis.text = element_text(size = 11), legend.position = "none") +
+  scale_x_discrete(labels = c("Fungus", "Bacterium", "Coinfected")) + 
+   theme(text = element_text(size=11), axis.text = element_text(size = 11)) +
+  geom_jitter(alpha = 0.7, show.legend = FALSE) +
+    ylim(10,80) 
+
+
+
+```
+
+
+## B.INFECTED HOST LIFESPAN (incomplete measure of virulence)
+### Data analysis
+
+### B.1. What is the relationships between host lifespan and parasite dose?
+
+#### Answer: Lifespan is determined mostly by infection class (IU, P, M, or C), but also by log Metsch dose
+```{r}
+###  Host lifespan ~ Pathogen dose  ###
+
+lifedoseinfcat_nouninf_log <- glm(lifespan.day ~ infect.cat + logaM + logaP + logaM*logaP, data = lifedat2.nozs, family = poisson())
+
+summary(lifedoseinfcat_nouninf_log)
+
+# Interaction isn't significant, so removing that
+lifedoseinfcat_nouninf_log_noint <- glm(lifespan.day ~ infect.cat + logaM + logaP, data = lifedat2.nozs, family = poisson())
+
+summary(lifedoseinfcat_nouninf_log_noint)
+drop1(lifedoseinfcat_nouninf_log_noint,test="Chisq")
+
+
+### Follow up analysis: what if we drop logaP and look at an interaction between infect.cat & logaM?
+
+followupinteractionmodel <- glm(lifespan.day ~ infect.cat * logaM, data = lifedat2.nozs, family = poisson())
+
+summary(followupinteractionmodel)
+drop1(followupinteractionmodel,test="Chisq")
+```
+
+```{r, plot to explore effect of metsch dose on lifespan}
+
+MetschDoseLifespanPlot <- 
+  ggplot(lifedat2.nozs, aes(logaM, lifespan.day, shape=infect.cat, colour=infect.cat, fill=infect.cat)) +
+  geom_smooth(method="lm") +
+  geom_point(size=3) +
+  ylim(10,80) +
+  ylab("Lifespan (days)") +
+  xlab("Log(fungal spore dose)") +
+#  ggtitle("Lifespan ~ bacterial spore yield")  + 
+   theme_bw() +
+  scale_fill_manual(values = c("#67a9cf", "#02818a", "#bdc9e1"), labels=c('coinf','fungus','bact')) +
+  scale_color_manual(values=c("#67a9cf","#02818a", "#bdc9e1"), labels=c('coinf','fungus','bact')) +
+  scale_shape_discrete(labels=c('coinf','fungus','bact')) +
+    theme(legend.position = c(0.75, 0.85), legend.key.size = unit(0.25, 'cm'))
+
+
+MetschDoseLifespanPlot
+
+
+lifedat2.nozs.justP <- lifedat2.nozs %>%
+  filter(infect.cat == "P")
+
+lifedat2.nozs.justM <- lifedat2.nozs %>%
+  filter(infect.cat == "M")
+
+lifedat2.nozs.justC <- lifedat2.nozs %>%
+  filter(infect.cat == "C")
+
+cor.test(lifedat2.nozs.justP$logaM, lifedat2.nozs.justP$lifespan.day)
+
+cor.test(lifedat2.nozs.justM$logaM, lifedat2.nozs.justM$lifespan.day)
+
+cor.test(lifedat2.nozs.justC$logaM, lifedat2.nozs.justC$lifespan.day)
+
+
+```
+
+```{r, making a combined lifespan figure}
+combinedlifespanplot <- ggarrange(life_infectcat_viol, MetschDoseLifespanPlot, 
+          labels = c("A", "B"),
+          align = c("h"),
+          ncol = 2, nrow = 1, common.legend = FALSE)
+
+combinedlifespanplot
+
+
+ggsave("combinedlifespanplot.png", combinedlifespanplot, width = 6, height = 3.5, dpi = 300)
+```
+
+B.2. Is lifespan significantly different between infection classes?
+
+#### Answer: Yes.
+```{r}
+###  Host lifespan ~ Infection class ###
+
+#NOTE TO KDM: I changed this to emmeans, which gives the ratio, which I think is handy
+lifeinfcat_contrasts <- emmeans(lifedoseinfcat_nouninf_log_noint, specs = pairwise ~ infect.cat, type = "response")
+lifeinfcat_contrasts
+
+#Mean number of days coinfected hosts lived: 
+Co_lifespan_mean <- 
+  translifedat2 %>%
+  filter(infect.cat == "C")
+
+mean(Co_lifespan_mean$lifespan.day)
+
+#Mean number of days Past-only infected hosts lived: 
+Past_lifespan_mean <- 
+  translifedat2 %>%
+  filter(infect.cat == "P")
+
+mean(Past_lifespan_mean$lifespan.day)
+
+#Mean number of days Metsch-only infected hosts lived: 
+Metsch_lifespan_mean <- 
+  translifedat2 %>%
+  filter(infect.cat == "M")
+
+mean(Metsch_lifespan_mean$lifespan.day)
+
+```
+
+
+#C: SPORE YIELD
+
+## Violin plots of final spore yield
+```{r}
+altdat <- translifedat2
+
+altwinP <- 
+  altdat %>%
+  filter(finP > 0)
+
+altwinM <- 
+  altdat %>%
+  filter(finM > 0)
+
+myield_viol <-
+  ggviolin(altwinM, x = "infect.cat", y = "finM", 
+         fill = "infect.cat",
+         scale = "width",
+         palette = c("#02818a", "#67a9cf"),
+         #add = c("boxplot"),
+         add.params = list(fill = "white"), 
+         xlab = " ",
+         ylab = "Fungal spore yield (spores per host)", 
+         show.legend = FALSE
+         ) + 
+  theme_bw() +
+  theme(text = element_text(size=11), axis.text = element_text(size = 11), legend.position = "none") +
+  scale_x_discrete(labels = c("Fungus", "Coinfected")) + 
+   theme(text = element_text(size=11), axis.text = element_text(size = 11)) +
+  geom_jitter(alpha = 0.7, show.legend = FALSE) 
+
+myield_viol
+
+
+pyield_viol <-
+  ggviolin(altwinP, x = "infect.cat", y = "finP", 
+         fill = "infect.cat",
+         scale = "width",
+         palette = c( "#bdc9e1","#67a9cf"),
+         #add = c("boxplot"),
+         add.params = list(fill = "white"), 
+         xlab = " ",
+         ylab = "Bacterial spore yield (spores per host)", 
+         show.legend = FALSE
+         ) + 
+  theme_bw() +
+  theme(text = element_text(size=11), axis.text = element_text(size = 11), legend.position = "none") +
+  scale_x_discrete(labels = c("Bacterium","Coinfected")) + 
+   theme(text = element_text(size=11), axis.text = element_text(size = 11)) +
+  geom_jitter(alpha = 0.7, show.legend = FALSE) 
+
+pyield_viol
+```
+
+## Does infection class (single v coinf) impact the final spore yield? 
+
+```{r}
+#Subset so all animals are infected with Past (single or coinf)
+transwinhostP <- transfinal %>% filter(P_yes == 1)
+#Subset so all animals are infected with Metsch (single or coinf)
+transwinhostM <- transfinal %>% filter(M_yes == 1)
+
+
+#Model effects of Coinfection, P dose, and M dose on finM (ie M yield)
+Mdens.parasiteID <- glm(finM ~ Co_yes + logaM + logaP, data = transwinhostM)
+
+#Model effects of Coinfection, M dose, and P dose on finP (ie P yield)
+Pdens.parasiteID <- glm(finP ~ Co_yes + logaM + logaP, data = transwinhostP) 
+
+summary(Mdens.parasiteID)
+summary(Pdens.parasiteID)
+
+#Finding the percent decrease in within-host density of Past due to coinfection with Metsch
+WinP_mean_Ponly <- 
+  transwinhostP %>%
+  filter(Co_yes == 0)
+
+mean(WinP_mean_Ponly$finP)
+
+WinP_mean_Coonly <- 
+  transwinhostP %>%
+  filter(Co_yes == 1)
+
+mean(WinP_mean_Coonly$finP)
+
+(mean(WinP_mean_Ponly$finP) - mean(WinP_mean_Coonly$finP)) / mean(WinP_mean_Ponly$finP)
+
+#Finding the percent increase in within-host density of Metsch due to coinfection with Past
+WinM_mean_Monly <- 
+  transwinhostM %>%
+  filter(Co_yes == 0)
+
+mean(WinM_mean_Monly$finM)
+
+WinM_mean_Coonly <- 
+  transwinhostM %>%
+  filter(Co_yes == 1)
+
+mean(WinM_mean_Coonly$finM)
+
+(mean(WinM_mean_Coonly$finM) - mean(WinM_mean_Monly$finM)) / mean(WinM_mean_Monly$finM)
+
+```
+
+### Plots of lifespan vs. spore yield
+```{r}
+LifespanMetschYieldPlot <- 
+  ggplot(altwinM, aes(lifespan.day, finM, shape=infect.cat, colour=infect.cat, fill=infect.cat)) +
+  geom_smooth(method="lm") +
+  geom_point(size=3) +
+  ylab("Fungal spore yield (spores per host)") +
+  xlab("Lifespan (days)") +
+   theme_bw() +
+  scale_fill_manual(values = c("#67a9cf", "#02818a"), labels=c('coinf','fungus')) +
+  scale_color_manual(values=c("#67a9cf","#02818a"), labels=c('coinf','fungus')) +
+  scale_shape_discrete(labels=c('coinf','fungus')) +
+    theme(legend.position = c(0.75, 0.85), legend.key.size = unit(0.25, 'cm'))
+
+LifespanMetschYieldPlot
+
+LifespanPastYieldPlot <- 
+  ggplot(altwinP, aes(lifespan.day, finP, shape=infect.cat, colour=infect.cat, fill=infect.cat)) +
+  geom_smooth(method="lm") +
+  geom_point(size=3) +
+  ylab("Bacterial spore yield (spores per host)") +
+  xlab("Lifespan (days)") +
+   theme_bw() +
+  scale_fill_manual(values = c("#67a9cf","#bdc9e1"), labels=c('coinf','bact')) +
+  scale_color_manual(values=c("#67a9cf","#bdc9e1"), labels=c('coinf','bact')) +
+  scale_shape_manual(values = c(19,15), labels=c('coinf','bact')) +
+    theme(legend.position = c(0.75, 0.85), legend.key.size = unit(0.25, 'cm'))
+
+LifespanPastYieldPlot
+```
+
+```{r, making a combined spore yield figure}
+combinedsporeyieldplot <- ggarrange(pyield_viol, myield_viol, LifespanPastYieldPlot,LifespanMetschYieldPlot,
+          labels = c("A", "B","C","D"),
+          align = c("h"),
+          ncol = 2, nrow = 2, common.legend = FALSE)
+
+combinedsporeyieldplot
+
+
+ggsave("combinedsporeyieldplot.png", combinedsporeyieldplot, width = 7, height = 7, dpi = 300)
+```
+
+```{r, lifespan spore yield correlations}
+
+#Subsetting for all animals infected with Past only
+transpastonly <- transfinal %>% filter(finP > 0 & finM == 0) %>% 
+  mutate(logaP = log(P+1),
+         logaM = log(M+1))
+#Subsetting for all animals infected with Metsch only
+transmetschonly <- transfinal %>% filter(finP == 0 & finM > 0) %>% 
+  mutate(logaP = log(P+1),
+         logaM = log(M+1))
+#Subsetting for all animals coinfected
+transcoinf <- transfinal %>% filter(finP > 0 & finM > 0) %>% 
+  mutate(logaP = log(P+1),
+         logaM = log(M+1))
+
+cor.test(transpastonly$lifespan.day,transpastonly$finP)
+
+cor.test(transmetschonly$lifespan.day,transmetschonly$finM)
+
+cor.test(transcoinf$lifespan.day,transcoinf$finP)
+
+cor.test(transcoinf$lifespan.day,transcoinf$finM)
+```
+
+
+## C.3. Is there a correlation between M spore yield and P spore yield?   
+
+```{r}
+
+PYieldMYieldPlot <- 
+  ggplot(transcoinf, aes(finP, finM)) +
+  geom_smooth(method="lm", color = c("#67a9cf"), fill = c("#67a9cf")) +
+  geom_point(size=3, color = c("#67a9cf"), fill = c("#67a9cf")) +
+  xlab("Bacterial spore yield (spores per host)") +
+    ylab("Fungal spore yield (spores per host)") +
+   theme_bw() +
+  scale_fill_manual(values = c("#67a9cf")) +
+  scale_color_manual(values=c("#67a9cf")) +
+  scale_shape_manual(values = c(19)) 
+
+PYieldMYieldPlot
+
+ggsave("PYieldMYieldPlot.png", PYieldMYieldPlot, width = 4, height = 3.5, dpi = 300)
+
+cor.test(transcoinf$finP, transcoinf$finM)
+
+```
+
+

@@ -1,0 +1,389 @@
+---
+title: "Dose effect multiparasite - Biomass data"
+author: "Kit McLean"
+date: "08/16/2023"
+output: html_document
+---
+
+## Biomass GAMs
+
+This document will compute the average mean and standard deviation for the within-host biomass (i.e. spore density * mean spore length within each host) of P. ramosa and M. bicuspidata at time of host death (this is a proxy for transmission) 
+
+```{r , ECHO = FALSE}
+
+
+library(psych)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(data.table)
+library(ggpubr)
+library(cowplot)
+
+```
+
+Loading data into R:
+
+```{r}
+
+splen <- read.csv("dd_coinf_spore_final.csv")
+
+colnames(splen)[15] <- "finP"
+colnames(splen)[19] <- "finM"
+
+#Find biomass mean and SD (Biomass = within-host density at time of host death * average spore length mean or SD)
+
+splen2 <-
+  splen %>%
+  mutate(m_mean_biomass = finM*m_meanleng, 
+         m_sd_biomass = finM*m_sdleng, 
+         p_mean_biomass = finP*p_meanleng,
+         p_sd_biomass = finP*p_sdleng)
+
+```
+
+Visualizing data: 
+
+A) LENGTH and B) BIOMASS of 1) fungus, and 2) bacterium in A) singly-infected vs B) coinfected hosts: 
+
+```{r}
+
+#One way to subset data by infection status (i.e. assign a character value)
+
+splen2$status <- 0
+splen2$status <- as.character(splen2$status)
+
+setDT(splen2)[P > as.numeric("0") & finP > as.numeric("0") & M > as.numeric("0") & finM == as.numeric("0"), status := "PCU"] # Pasteuria only (coinfection unsuccessful)
+splen2[M > as.numeric("0") & finM > as.numeric("0") & P > as.numeric("0") & finP == as.numeric("0"), status := "MCU"] #Metsch only (coinfection unsuccessful)
+splen2[P == as.numeric("0") & finP == as.numeric("0") | M == as.numeric("0") & finM == as.numeric("0") , status := "US"] #0,0 exposure and a 0,0 infection--there should be NONE of these since we did not include a completely uninfected (0,0) control group 
+splen2[P > as.numeric("0") & finP > as.numeric("0") & M == as.numeric("0") & finM == as.numeric("0"), status := "PS"] #Pasteuria infection successful
+splen2[M > as.numeric("0") & finM > as.numeric("0") & P == as.numeric("0") & finP == as.numeric("0"), status := "MS"] #Metsch infection successful
+splen2[M > as.numeric("0") & finM > as.numeric("0") & P > as.numeric("0") & finP > as.numeric("0"), status := "CS"] #Coinfection successful
+
+#filter out those with missing data
+splen2 <- splen2 %>% 
+  filter(status != 0)
+splen2 <- splen2[!(splen2$status == "MCU" & splen2$p_sdleng > 0),]
+splen2 <- splen2[!(splen2$status == "CS" & splen2$m_meanleng == 0),]
+splen2 <- splen2[!(splen2$status == "CS" & splen2$p_meanleng == 0),]
+splen2 <- splen2[!(splen2$status == "PCU" & splen2$p_meanleng == 0),]
+
+```
+
+
+
+Another attempt at visualizing data, first for Metschnikowia:
+
+```{r}
+
+#Metsch mean biomass
+
+ggplot(splen2, aes(x = status, y = m_mean_biomass)) +
+  geom_boxplot() + geom_jitter(alpha = 0.4, size = 2)
+
+#Metsch sd biomass
+
+ggplot(splen2, aes(x = status, y = m_sd_biomass)) +
+  geom_boxplot() + geom_jitter(alpha = 0.4, size = 2)
+
+#Metsch mean spore length
+
+ggplot(splen2, aes(x = status, y = m_meanleng)) +
+  geom_boxplot() + geom_jitter(alpha = 0.4, size = 2)
+
+#Metsch sd spore length
+
+ggplot(splen2, aes(x = status, y = m_sdleng)) +
+  geom_boxplot() + geom_jitter(alpha = 0.4, size = 2)
+```
+
+Now for Pasteuria...
+```{r}
+ 
+#Pasteuria
+
+ggplot(splen2, aes(x = status, y = p_mean_biomass)) +
+  geom_boxplot() + geom_jitter(alpha = 0.4, size = 2)
+
+ggplot(splen2, aes(x = status, y = p_sd_biomass)) +
+  geom_boxplot() + geom_jitter(alpha = 0.4, size = 2)
+
+ggplot(splen2, aes(x = status, y = p_meanleng)) +
+  geom_boxplot() + geom_jitter(alpha = 0.4, size = 2)
+
+ggplot(splen2, aes(x = status, y = p_sdleng)) +
+  geom_boxplot() + geom_jitter(alpha = 0.4, size = 2)
+
+#Past has a weirdly broad SD for spore size in coinfected hosts.  Could this be due to shortened host lifespan?
+
+#Check relationship between host lifespan and P size (mean)
+Pdat <- subset(splen2, status == "PCU" | status == "PS" | status == "CS") 
+
+ggplot(Pdat, aes(x = lifespan.day, y = p_meanleng, color = status)) +
+  geom_point(alpha = 0.4, size = 2)  + geom_smooth(method = "lm")
+
+#... and P size (SD)
+ggplot(Pdat, aes(x = lifespan.day, y = p_sdleng, color = status)) +
+  geom_point(alpha = 0.4, size = 2)
+
+#Check relationship between host lifespan and M size (mean)
+Mdat <- subset(splen2, status == "MCU" | status == "MS" | status == "CS")
+
+ggplot(Mdat, aes(x = lifespan.day, y = m_meanleng, color = status)) +
+  geom_point(alpha = 0.4, size = 2)  + geom_smooth(method = "lm")
+
+# ... and M size (SD)
+ggplot(Mdat, aes(x = lifespan.day, y = m_sdleng, color = status)) +
+  geom_point(alpha = 0.4, size = 2)
+```
+
+Now to run a binomial test to see if Coinfection significantly changes the mean or SD of P spore length (as it appears it might when viewing data).
+
+```{r, fig.height=2, fig.width=2.7}
+
+# Convert "coinfection" to 1 and "Past-only infection" to 0
+Pdat1 <- Pdat %>%
+  mutate(status = recode(status,
+                         "CS" = "Coinfected",
+                         "PCU" = "Bacterium only",
+                         "PS" = "Bacterium only"))
+
+Pdat1$status <- factor(Pdat1$status , levels=c("Bacterium only", "Coinfected"))
+
+#Remove all rows with P biomass == 0 (this is NA data that will inaccurately skew results)
+Pdat2 <- Pdat1 %>% 
+  filter(p_mean_biomass != 0)
+
+#check for normal distribution of sd data (can I do that?)
+Psize_infcat <- ggplot(Pdat2, aes(y = p_meanleng, x = status)) + 
+  geom_boxplot(aes(color = status, fill = status), alpha = 0.4, show.legend = FALSE) +
+  xlab("Infection class") + 
+  ylab("mean spore length (\U003BCm)") +
+    scale_color_manual(values = c("#bdc9e1", "#67a9cf")) +
+    scale_fill_manual(values = c("#bdc9e1", "#67a9cf")) +
+    theme_bw() +
+  stat_compare_means(method = "t.test", label.x = 1.22, label.y = 4.5)
+
+Psize_infcat <- 
+  ggviolin(Pdat2, x = "status", y = "p_meanleng",
+          legend = "none",
+         fill = "status", 
+         scale = "width",
+         palette = c("#bdc9e1", "#67a9cf"),
+         add = c("boxplot"),
+         add.params = list(fill = "white"),
+         xlab = "Infection class",
+         ylab = "mean spore length (\U003BCm)",
+         font.label = list(size = 11),)  + 
+  theme_bw() +
+  scale_x_discrete(labels = c("Bacterium\nonly", "Coinfection")) +
+  geom_jitter(alpha = 0.4) +
+    theme(text = element_text(size=11), legend.position = "none") +
+    stat_compare_means(method = "t.test", label.x = 0.8, label.y = 4)
+
+Psize_infcat
+
+t.test(p_meanleng ~ status, Pdat2, var.equal = FALSE)
+
+
+```
+Now for Mestch....
+```{r, fig.height=2, fig.width=2.7}
+# Convert "coinfection" to 1 and "Metsch-only infection" to 0
+Mdat1 <- Mdat %>%
+  mutate(status = recode(status,
+                         "CS" = "Coinfected",
+                         "MCU" = "Fungus only",
+                         "MS" = "Fungus only"))
+Mdat1$status <- factor(Mdat1$status, levels = c("Fungus only", "Coinfected"))
+#Remove all rows with P biomass == 0 (this is NA data that will inaccurately skew results)
+Mdat2 <- Mdat1 %>% 
+  filter(m_mean_biomass != 0)
+
+
+#check for normal distribution of sd data (can I do that?)
+Msize_infcat <- 
+  ggviolin(Mdat2, x = "status", y = "m_meanleng",
+          legend = "none",
+         fill = "status", 
+         scale = "width",
+         palette = c("#02818a", "#67a9cf"),
+         add = c("boxplot"),
+         add.params = list(fill = "white"),
+         xlab = "Infection class",
+         ylab = "mean spore length (\U003BCm)",
+         font.label = list(size = 11),)  + 
+  theme_bw() +
+  scale_x_discrete(labels = c("Fungus\nonly", "Coinfection")) +
+  geom_jitter(alpha = 0.4) +
+    theme(text = element_text(size=11), legend.position = "none") +
+    stat_compare_means(method = "t.test", label.x = 0.8, label.y = 41)
+
+Msize_infcat
+
+
+t.test(m_meanleng ~ status, data = Mdat2, var.equal = FALSE)
+
+M_Coinf_var_test <- Mdat2 %>%
+  kruskal.test(m_meanleng ~ status)
+
+
+```
+
+Length & biomass of 1) fungus vs. A) bacterium (within coinfected hosts; be sure to plot paired data & account for pairing in stats):
+```{r}
+
+succ0b <- 
+  splen2 %>%
+  filter(P == as.numeric("0") & finP == as.numeric("0")|
+        M == as.numeric("0") & finM == as.numeric("0"))
+           
+succPb <- 
+  splen2 %>%
+  filter(P > as.numeric("0") & finP > as.numeric("0"))
+
+succMb <-  
+  splen2 %>%
+  filter(M > as.numeric("0") & finM > as.numeric("0"))
+
+succCoinfb <-
+  splen2 %>%
+  filter(M > as.numeric("0") & finM > as.numeric("0") & P > as.numeric("0") & finP > as.numeric("0"))
+
+succb <- do.call("rbind", list(succ0b, succPb, succMb, succCoinfb))
+
+ggplot(succCoinfb, aes(x = p_mean_biomass, y = m_mean_biomass)) +
+  geom_point() 
+
+ggplot(succCoinfb, aes(x = p_meanleng, y = m_meanleng)) +
+  geom_point() 
+
+#Pearson correlation coefficient for paired samples
+cor.test(succCoinfb$p_meanleng, succCoinfb$m_meanleng, method = "pearson")
+```
+
+Length of 1) fungus and 2) bacterium vs. A) fungus dose and B) bacterium dose (within coinfected hosts; be sure to plot paired data & account for pairing in stats):
+```{r}
+
+ggplot(succCoinfb, aes(x = M, y = m_meanleng)) +
+  geom_point() 
+
+ggplot(succCoinfb, aes(x = P, y = p_meanleng)) +
+  geom_point() 
+
+ggplot(succCoinfb, aes(x = finM, y = m_meanleng)) +
+  geom_point() 
+
+ggplot(succCoinfb, aes(x = finP, y = p_meanleng)) +
+  geom_point() 
+
+
+#Pearson correlation coefficient for paired samples
+Pearson_M_Mleng <- cor.test(succCoinfb$M, succCoinfb$m_meanleng, method = "pearson")
+Pearson_M_Mleng
+
+Pearson_P_Pleng <- cor.test(succCoinfb$P, succCoinfb$p_meanleng, method = "pearson")
+Pearson_P_Pleng
+
+
+```
+
+Length of 1) fungus and 2) bacterium vs. A) fungus dose and B) bacterium dose (within any host)
+```{r}
+
+Mdat2$M <- as.factor(Mdat2$M)
+
+Msize_Mdose <- Mdat2 %>%
+  ggplot(aes(x = M, y = m_meanleng)) +
+  geom_boxplot() + 
+  theme_bw() +
+  xlab("Fungal dose (spores/mL)") + 
+  ylab("mean spore length (\U003BCm)") 
+
+Pdat2$P <- as.factor(Pdat2$P)
+
+Psize_Pdose <- Pdat2 %>%
+  ggplot(aes(x = P, y = p_meanleng)) +
+  geom_boxplot()  + 
+  theme_bw() +
+  xlab("Bacterial dose (spores/mL)") + 
+  ylab("mean spore length (\U003BCm)")
+
+
+#Pearson correlation coefficient for paired samples
+Pearson_M_Mleng <- cor.test(Mdat$M, Mdat$m_meanleng, method = "pearson")
+Pearson_M_Mleng
+
+Pearson_P_Pleng <- cor.test(Pdat$P, Pdat$p_meanleng, method = "pearson")
+Pearson_P_Pleng
+
+#Or we can treat dose as a categorical variable
+Pdat3 <- Pdat2
+Pdat3$P <- as.character(Pdat3$P)
+summary(aov(p_meanleng ~ P, data = Pdat3))
+
+Mdat3 <- Mdat2
+Mdat3$M <- as.character(Mdat3$M)
+summary(aov(m_meanleng ~ M, data = Mdat3))
+
+```
+
+Biomass of 1) fungus and 2) bacterium vs.host lifespan in A) single infections and C) coinfections:
+```{r}
+
+# #Metsch 
+# plot <- ggplot(df[which(df$prop>0),], aes(X5employff, prop)) +
+#   geom_bar(aes(fill=X5employff, stat="identity")) +
+#   facet_grid( ~ X5employf, scales="free_x") +
+#   theme_bw()
+
+#Trying to use "which" so I don't have to subset data
+Msize_lifespan<-
+  ggplot(Mdat1[which(Mdat1$M>0 & Mdat1$finM>0),], aes(x = lifespan.day, y = m_meanleng, color = status)) +
+  geom_point(alpha = 0.4, size = 2)  + geom_smooth(method = "lm", aes(fill = status)) +
+  xlab("Host lifespan") + 
+  ylab("mean spore length (\U003BCm)") +
+    scale_color_manual(values = c("#02818a", "#67a9cf")) +
+    scale_fill_manual(values = c("#02818a", "#67a9cf")) +
+    theme_bw() +
+    theme(legend.position = c(.75, .25))
+
+ggplot(splen2[which(splen2$M>0 & splen2$finM>0),], aes(x = lifespan.day, y = finM)) +
+  geom_point()
+
+
+#Pasteuria 
+Psize_lifespan <-
+  ggplot(Pdat1[which(Pdat1$P>0 & Pdat1$finP>0),], aes(x = lifespan.day, y = p_meanleng, color = status)) +
+  geom_point(alpha = 0.4, size = 2)  + 
+  geom_smooth(method = "lm", aes(fill = status)) +
+  xlab("Host lifespan") + 
+  ylab("mean spore length (\U003BCm)") +
+    scale_color_manual(values = c("#bdc9e1", "#67a9cf")) +
+    scale_fill_manual(values = c("#bdc9e1", "#67a9cf")) +
+    theme_bw() +
+    theme(legend.position = c(.75, .25))
+
+Psize_lifespan
+
+ggplot(splen2[which(splen2$P>0 & splen2$finP>0),], aes(x = lifespan.day, y = finP)) +
+  geom_point()
+
+
+## Stats looking for sig relationship between spore size and lifespan
+Pearson_life_Mleng <- cor.test(Mdat$M, Mdat$lifespan.day, method = "pearson")
+Pearson_life_Mleng
+
+Pearson_life_Pleng <- cor.test(Pdat$P, Pdat$lifespan.day, method = "pearson")
+Pearson_life_Pleng
+
+
+```
+Using cowplot to create a 6 panel figure
+```{r, fig.height= 5, fig.width= 4}
+ plot_grid(Psize_Pdose, Msize_Mdose, Psize_lifespan, Msize_lifespan, Psize_infcat, Msize_infcat, labels = "AUTO", align = "h", ncol = 2)
+ 
+ 
+```
